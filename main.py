@@ -6,6 +6,8 @@ import tempfile
 from pathlib import Path
 
 import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 from openpyxl import load_workbook
 
@@ -99,6 +101,13 @@ Un candidato solo se considera “Apto ahora” si cumple los cuatro requisitos:
 
 Si nadie cumple ese estándar, la app puede concluir que **todavía no hay un senior claro**.
 """
+
+
+
+
+def initialize_app_state():
+    if "uploader_key" not in st.session_state:
+        st.session_state["uploader_key"] = 0
 
 
 # =========================================================
@@ -512,9 +521,82 @@ def build_excel_report(scored_candidates: list):
     return bio.getvalue()
 
 
+def build_bar_chart(ranking_df: pd.DataFrame):
+    chart_df = ranking_df.copy().sort_values("Senior Score", ascending=True)
+    min_score = float(chart_df["Senior Score"].min()) if not chart_df.empty else 0.0
+    max_score = float(chart_df["Senior Score"].max()) if not chart_df.empty else 100.0
+    range_min = max(0.0, min_score - 8.0)
+    range_max = min(100.0, max_score + 4.0)
+    if range_max - range_min < 12:
+        range_min = max(0.0, range_max - 12.0)
+
+    fig = px.bar(
+        chart_df,
+        x="Senior Score",
+        y="Nombre",
+        orientation="h",
+        text="Senior Score",
+        color="Apto senior ahora",
+        color_discrete_map={"Sí": "#2E8B57", "No": "#D2691E"},
+    )
+    fig.update_traces(texttemplate="%{text:.1f}", textposition="outside", cliponaxis=False)
+    fig.update_layout(
+        height=max(380, 70 * len(chart_df)),
+        xaxis_title="Senior Score",
+        yaxis_title="",
+        xaxis_range=[range_min, range_max],
+        legend_title="Apto senior ahora",
+        margin=dict(l=20, r=30, t=20, b=20),
+    )
+    return fig
+
+
+def build_radar_chart(scored_candidates: list):
+    categories = [
+        "Rendimiento global",
+        "Equilibrio troncos",
+        "Indicadores críticos",
+        "Transferencia/formación",
+        "Ventaja frente a media",
+    ]
+
+    fig = go.Figure()
+    for item in scored_candidates:
+        candidate = item["candidate"]
+        score = item["score"]
+        values = [
+            score["component_global"],
+            score["component_balance"],
+            score["component_critical"],
+            score["component_transfer"],
+            score["component_team_advantage"],
+        ]
+        fig.add_trace(
+            go.Scatterpolar(
+                r=values + [values[0]],
+                theta=categories + [categories[0]],
+                fill="toself",
+                name=candidate["name"],
+                opacity=0.25,
+            )
+        )
+
+    fig.update_layout(
+        polar=dict(
+            radialaxis=dict(visible=True, range=[0, 100]),
+        ),
+        showlegend=True,
+        height=650,
+        margin=dict(l=40, r=40, t=20, b=20),
+    )
+    return fig
+
+
 # =========================================================
 # APP
 # =========================================================
+
+initialize_app_state()
 
 st.title("Senior Technical Consultant Selector")
 st.caption(
@@ -531,12 +613,23 @@ st.info(
     "con las fórmulas actualizadas."
 )
 
-uploaded_files = st.file_uploader(
-    "Sube de 2 a 10 evaluaciones (.xlsm o .xlsx)",
-    type=["xlsm", "xlsx"],
-    accept_multiple_files=True,
-    help="Cada archivo debe corresponder a una evaluación individual completa.",
-)
+upload_col, clear_col = st.columns([4, 1.2])
+
+with upload_col:
+    uploaded_files = st.file_uploader(
+        "Sube de 2 a 10 evaluaciones (.xlsm o .xlsx)",
+        type=["xlsm", "xlsx"],
+        accept_multiple_files=True,
+        help="Cada archivo debe corresponder a una evaluación individual completa.",
+        key=f"uploader_{st.session_state['uploader_key']}",
+    )
+
+with clear_col:
+    st.write("")
+    st.write("")
+    if st.button("Borrar evaluación cargada", use_container_width=True):
+        st.session_state["uploader_key"] += 1
+        st.rerun()
 
 if not uploaded_files:
     st.stop()
@@ -613,8 +706,14 @@ with col4:
 with col5:
     st.metric("Mejor vs media BBDD", format_pct(max((x["candidate"]["global"]["vs_bbdd"] or 0) for x in parsed_candidates)))
 
-chart_df = ranking_df[["Nombre", "Senior Score"]].set_index("Nombre")
-st.bar_chart(chart_df)
+st.markdown("**Comparación visual del ranking final**")
+st.plotly_chart(build_bar_chart(ranking_df), use_container_width=True)
+
+st.markdown("**Mapa de fortalezas y debilidades de los candidatos**")
+st.caption(
+    "El gráfico de araña compara los 5 componentes del Senior Score. Cuanto más lejos del centro, mejor posicionamiento en ese componente."
+)
+st.plotly_chart(build_radar_chart(parsed_candidates), use_container_width=True)
 
 st.subheader("Detalle y argumentos por candidato")
 

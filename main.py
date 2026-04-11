@@ -52,6 +52,33 @@ RANKING_WEIGHTS = {
     "team_advantage": 0.10,
 }
 
+EXIGENCE_LEVELS = {
+    3: {
+        "label": "Nivel 3 · Exigencia alta",
+        "global_vs_goal": 1.00,
+        "min_trunk": 0.90,
+        "max_weak_critical": 1,
+        "transfer_floor": 55.0,
+        "senior_score_floor": 68.0,
+    },
+    2: {
+        "label": "Nivel 2 · Exigencia media",
+        "global_vs_goal": 0.96,
+        "min_trunk": 0.85,
+        "max_weak_critical": 2,
+        "transfer_floor": 50.0,
+        "senior_score_floor": 62.0,
+    },
+    1: {
+        "label": "Nivel 1 · Exigencia flexible",
+        "global_vs_goal": 0.92,
+        "min_trunk": 0.80,
+        "max_weak_critical": 3,
+        "transfer_floor": 45.0,
+        "senior_score_floor": 56.0,
+    },
+}
+
 CRITERIA_TABLE = pd.DataFrame(
     [
         {
@@ -87,22 +114,54 @@ CRITERIA_TABLE = pd.DataFrame(
     ]
 )
 
+EXIGENCE_TABLE = pd.DataFrame(
+    [
+        {
+            "Nivel": "3 · Alta",
+            "Objetivo": "Elegir solo perfiles muy consolidados y claramente senior.",
+            "Vs objetivo global": "≥ 100%",
+            "Peor tronco": "≥ 90%",
+            "Críticos con gap": "máx. 1",
+            "Transferencia": "≥ 55/100",
+            "Senior Score": "≥ 68/100",
+        },
+        {
+            "Nivel": "2 · Media",
+            "Objetivo": "Permitir perfiles sólidos aunque aún no sean completamente redondos.",
+            "Vs objetivo global": "≥ 96%",
+            "Peor tronco": "≥ 85%",
+            "Críticos con gap": "máx. 2",
+            "Transferencia": "≥ 50/100",
+            "Senior Score": "≥ 62/100",
+        },
+        {
+            "Nivel": "1 · Flexible",
+            "Objetivo": "Identificar al mejor candidato disponible aunque todavía tenga recorrido.",
+            "Vs objetivo global": "≥ 92%",
+            "Peor tronco": "≥ 80%",
+            "Críticos con gap": "máx. 3",
+            "Transferencia": "≥ 45/100",
+            "Senior Score": "≥ 56/100",
+        },
+    ]
+)
+
 CRITERIA_TEXT = """
 **Regla clave de justicia:** la app no elige automáticamente a quien tiene la mayor nota global.
 Elige al perfil más adecuado para actuar como **consultor senior**, es decir, un técnico sólido,
 equilibrado, fuerte en los indicadores críticos y con capacidad de referencia y de formación.
 
-**Antes del ranking final hay un filtro mínimo de elegibilidad senior.**
-Un candidato solo se considera “Apto ahora” si cumple los cuatro requisitos:
-1. Está **por encima del objetivo global**.
-2. No tiene ningún tronco **claramente débil**.
-3. No acumula carencias graves en los **indicadores críticos**.
-4. Tiene una base suficiente en **transferencia/formación**.
+**El ranking final** combina cinco componentes:
+- 35% rendimiento técnico global
+- 20% equilibrio entre troncos
+- 20% indicadores críticos para senior
+- 15% capacidad de transferencia y formación
+- 10% ventaja respecto a la media del equipo
 
-Si nadie cumple ese estándar, la app puede concluir que **todavía no hay un senior claro**.
+**Niveles de exigencia:** la app permite trabajar con exigencia 3, 2 o 1.
+Si con el nivel 3 no aparece un candidato claro, puede proponerse el mejor perfil disponible en nivel 2 o 1.
+Esto hace la herramienta más útil para la toma de decisiones sin perder rigor.
 """
-
-
 
 
 def initialize_app_state():
@@ -371,14 +430,25 @@ def score_candidate(candidate: dict):
         + RANKING_WEIGHTS["team_advantage"] * team_advantage_score
     )
 
-    min_trunk = min_trunk_goal if trunk_goal_values else 0.0
-    eligibility_checks = {
-        "global_vs_goal": (global_summary["vs_goal"] is not None and global_summary["vs_goal"] >= 1.00),
-        "weakest_trunk": (min_trunk >= 0.90),
-        "critical_gaps": (weak_critical_count <= 1),
-        "transfer_floor": (transfer_score >= 55.0),
-    }
-    eligible_now = all(eligibility_checks.values())
+    eligibility_by_level = {}
+    for level, cfg in EXIGENCE_LEVELS.items():
+        checks = {
+            "global_vs_goal": (global_summary["vs_goal"] is not None and global_summary["vs_goal"] >= cfg["global_vs_goal"]),
+            "weakest_trunk": (min_trunk_goal >= cfg["min_trunk"]),
+            "critical_gaps": (weak_critical_count <= cfg["max_weak_critical"]),
+            "transfer_floor": (transfer_score >= cfg["transfer_floor"]),
+            "senior_score_floor": (senior_score >= cfg["senior_score_floor"]),
+        }
+        eligibility_by_level[level] = {
+            "eligible": all(checks.values()),
+            "checks": checks,
+        }
+
+    highest_level_met = 0
+    for level in sorted(EXIGENCE_LEVELS.keys(), reverse=True):
+        if eligibility_by_level[level]["eligible"]:
+            highest_level_met = level
+            break
 
     return {
         "component_global": round(global_score, 1),
@@ -387,11 +457,19 @@ def score_candidate(candidate: dict):
         "component_transfer": round(transfer_score, 1),
         "component_team_advantage": round(team_advantage_score, 1),
         "senior_score": round(senior_score, 1),
-        "eligible_now": eligible_now,
-        "eligibility_checks": eligibility_checks,
         "weak_critical_count": weak_critical_count,
         "above_bbdd_pct": round(above_bbdd_pct, 1),
+        "highest_level_met": highest_level_met,
+        "eligibility_by_level": eligibility_by_level,
     }
+
+
+def eligible_at_level(score_data: dict, level: int) -> bool:
+    return bool(score_data["eligibility_by_level"].get(level, {}).get("eligible", False))
+
+
+def checks_for_level(score_data: dict, level: int) -> dict:
+    return score_data["eligibility_by_level"].get(level, {}).get("checks", {})
 
 
 def top_strengths(indicators_df: pd.DataFrame, top_n=3):
@@ -418,7 +496,7 @@ def main_gaps(indicators_df: pd.DataFrame, top_n=3):
     return gaps[["indicator", "tronco", "score_raw", "vs_goal", "vs_bbdd"]].to_dict("records")
 
 
-def candidate_argument(candidate: dict, score_data: dict, selected_name: str = None):
+def candidate_argument(candidate: dict, score_data: dict, selected_name: str, active_level: int, effective_level: int):
     global_summary = candidate["global"]
     strengths = top_strengths(candidate["indicators"], top_n=3)
     gaps = main_gaps(candidate["indicators"], top_n=3)
@@ -430,35 +508,39 @@ def candidate_argument(candidate: dict, score_data: dict, selected_name: str = N
         [f"{x['indicator']} ({format_pct(x['vs_goal'])} vs objetivo)" for x in gaps]
     ) or "sin gaps relevantes"
 
-    if candidate["name"] == selected_name and score_data["eligible_now"]:
+    if candidate["name"] == selected_name and eligible_at_level(score_data, effective_level):
+        level_txt = EXIGENCE_LEVELS[effective_level]["label"]
         return (
             f"**Elección propuesta para consultor senior.** "
-            f"Obtiene el mejor Senior Score ({score_data['senior_score']}/100), "
+            f"Obtiene el mejor Senior Score ({score_data['senior_score']}/100) entre los candidatos que cumplen el **{level_txt}**, "
             f"supera el objetivo global ({format_pct(global_summary['vs_goal'])}), "
             f"mantiene un perfil equilibrado y presenta fortalezas especialmente relevantes para el rol: {strengths_txt}. "
-            f"Su tronco más sólido es **{candidate['strongest_trunk']}** y no muestra debilidades estructurales incompatibles con el rol."
+            f"Su tronco más sólido es **{candidate['strongest_trunk']}**."
         )
 
+    checks = checks_for_level(score_data, active_level)
     reasons = []
-    if not score_data["eligibility_checks"]["global_vs_goal"]:
-        reasons.append("no supera el objetivo global")
-    if not score_data["eligibility_checks"]["weakest_trunk"]:
+    if checks and not checks.get("global_vs_goal", True):
+        reasons.append("no alcanza el estándar global exigido")
+    if checks and not checks.get("weakest_trunk", True):
         reasons.append(f"presenta debilidad en el tronco {candidate['weakest_trunk']}")
-    if not score_data["eligibility_checks"]["critical_gaps"]:
+    if checks and not checks.get("critical_gaps", True):
         reasons.append("acumula carencias en indicadores críticos")
-    if not score_data["eligibility_checks"]["transfer_floor"]:
+    if checks and not checks.get("transfer_floor", True):
         reasons.append("todavía no alcanza suficiente capacidad de transferencia/formación")
+    if checks and not checks.get("senior_score_floor", True):
+        reasons.append("su Senior Score total aún queda por debajo del umbral elegido")
 
-    reason_txt = ", ".join(reasons) if reasons else "queda por detrás de otros candidatos con mejor combinación global para el rol"
+    reason_txt = ", ".join(reasons) if reasons else "otros candidatos muestran una combinación más completa para el rol"
     return (
-        f"**No propuesto como senior por ahora.** "
+        f"**No priorizado en el nivel de exigencia seleccionado.** "
         f"Sus principales fortalezas son: {strengths_txt}. "
-        f"No obstante, la app no lo prioriza como senior porque {reason_txt}. "
+        f"No obstante, la app no lo sitúa en primer lugar porque {reason_txt}. "
         f"Los principales focos de mejora son: {gaps_txt}."
     )
 
 
-def ranking_dataframe(scored_candidates: list) -> pd.DataFrame:
+def ranking_dataframe(scored_candidates: list, active_level: int) -> pd.DataFrame:
     rows = []
     for idx, item in enumerate(scored_candidates, start=1):
         candidate = item["candidate"]
@@ -469,7 +551,8 @@ def ranking_dataframe(scored_candidates: list) -> pd.DataFrame:
                 "Ranking": idx,
                 "Nombre": candidate["name"],
                 "Especie": candidate["species"],
-                "Apto senior ahora": "Sí" if score_data["eligible_now"] else "No",
+                "Apto nivel seleccionado": "Sí" if eligible_at_level(score_data, active_level) else "No",
+                "Máximo nivel que cumple": score_data["highest_level_met"] if score_data["highest_level_met"] else "-",
                 "Senior Score": score_data["senior_score"],
                 "Nivel global": candidate["global_level"],
                 "Vs objetivo global": pct(global_summary["vs_goal"]),
@@ -482,7 +565,7 @@ def ranking_dataframe(scored_candidates: list) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def detailed_export_dataframe(scored_candidates: list) -> pd.DataFrame:
+def detailed_export_dataframe(scored_candidates: list, active_level: int) -> pd.DataFrame:
     rows = []
     for item in scored_candidates:
         candidate = item["candidate"]
@@ -500,35 +583,96 @@ def detailed_export_dataframe(scored_candidates: list) -> pd.DataFrame:
                     "Vs máximo": pct(row["vs_max"]),
                     "Vs media BBDD": pct(row["vs_bbdd"]),
                     "Senior Score candidato": score_data["senior_score"],
-                    "Apto senior ahora": "Sí" if score_data["eligible_now"] else "No",
+                    "Apto nivel seleccionado": "Sí" if eligible_at_level(score_data, active_level) else "No",
+                    "Máximo nivel que cumple": score_data["highest_level_met"] if score_data["highest_level_met"] else "-",
                 }
             )
     return pd.DataFrame(rows)
 
 
-def build_excel_report(scored_candidates: list):
-    ranking_df = ranking_dataframe(scored_candidates)
-    detail_df = detailed_export_dataframe(scored_candidates)
+def build_excel_report(scored_candidates: list, active_level: int):
+    ranking_df = ranking_dataframe(scored_candidates, active_level)
+    detail_df = detailed_export_dataframe(scored_candidates, active_level)
     method_df = CRITERIA_TABLE.copy()
+    exigence_df = EXIGENCE_TABLE.copy()
 
     bio = io.BytesIO()
     with pd.ExcelWriter(bio, engine="xlsxwriter") as writer:
         ranking_df.to_excel(writer, sheet_name="Ranking", index=False)
         detail_df.to_excel(writer, sheet_name="Detalle", index=False)
         method_df.to_excel(writer, sheet_name="Criterios", index=False)
+        exigence_df.to_excel(writer, sheet_name="Exigencia", index=False)
 
     bio.seek(0)
     return bio.getvalue()
 
 
-def build_bar_chart(ranking_df: pd.DataFrame):
+def pick_candidate(scored_candidates: list, active_level: int):
+    eligible_current = [x for x in scored_candidates if eligible_at_level(x["score"], active_level)]
+    if eligible_current:
+        return eligible_current[0], active_level, False
+
+    for lower_level in sorted([lvl for lvl in EXIGENCE_LEVELS if lvl < active_level], reverse=True):
+        eligible_lower = [x for x in scored_candidates if eligible_at_level(x["score"], lower_level)]
+        if eligible_lower:
+            return eligible_lower[0], lower_level, True
+
+    return scored_candidates[0], 0, True
+
+
+def build_global_report(scored_candidates: list, selected_item: dict, active_level: int, effective_level: int) -> str:
+    candidate = selected_item["candidate"]
+    score_data = selected_item["score"]
+    global_summary = candidate["global"]
+
+    aptos_l3 = sum(1 for x in scored_candidates if eligible_at_level(x["score"], 3))
+    aptos_l2 = sum(1 for x in scored_candidates if eligible_at_level(x["score"], 2))
+    aptos_l1 = sum(1 for x in scored_candidates if eligible_at_level(x["score"], 1))
+
+    strengths = top_strengths(candidate["indicators"], top_n=2)
+    gaps = main_gaps(candidate["indicators"], top_n=2)
+    strength_txt = ", ".join([x["indicator"] for x in strengths]) if strengths else "sin fortalezas especialmente diferenciales"
+    gap_txt = ", ".join([x["indicator"] for x in gaps]) if gaps else "sin gaps destacados"
+
+    lines = [
+        f"1. Se han comparado {len(scored_candidates)} candidatos con el mismo algoritmo de ranking senior.",
+        f"2. El nivel de exigencia seleccionado por el director técnico ha sido el {active_level}.",
+        f"3. Aptos en nivel 3: {aptos_l3}; aptos en nivel 2: {aptos_l2}; aptos en nivel 1: {aptos_l1}.",
+        f"4. El candidato finalmente propuesto es {candidate['name']}.",
+        f"5. Su Senior Score global es {score_data['senior_score']}/100 y su nivel técnico medio es {candidate['global_level']}.",
+        f"6. Frente al objetivo global alcanza {format_pct(global_summary['vs_goal'])}, y frente a la media BBDD {format_pct(global_summary['vs_bbdd'])}.",
+        f"7. Su tronco más fuerte es {candidate['strongest_trunk']} y el más débil es {candidate['weakest_trunk']}.",
+        f"8. Sus fortalezas más diferenciales para el rol senior son {strength_txt}.",
+        f"9. Los principales puntos que todavía conviene seguir desarrollando son {gap_txt}.",
+        f"10. La elección se apoya en una combinación de rendimiento global, equilibrio, críticos, transferencia y ventaja sobre la media del equipo."
+            if effective_level else
+            f"10. No cumple todavía un estándar senior formal, pero sigue siendo el mejor perfil disponible para priorizar desarrollo."
+    ]
+
+    if effective_level and effective_level < active_level:
+        lines[3] = (
+            f"4. No apareció un candidato válido en el nivel {active_level}; por eso la propuesta baja al nivel {effective_level} "
+            f"y selecciona a {candidate['name']} como mejor perfil disponible."
+        )
+    elif effective_level == 0:
+        lines[3] = (
+            f"4. No aparece ningún candidato que cumpla los niveles 3, 2 o 1; aun así, {candidate['name']} es el mejor perfil actual del grupo."
+        )
+
+    return "\n".join(lines)
+
+
+def build_bar_chart(ranking_df: pd.DataFrame, active_level: int):
     chart_df = ranking_df.copy().sort_values("Senior Score", ascending=True)
     min_score = float(chart_df["Senior Score"].min()) if not chart_df.empty else 0.0
     max_score = float(chart_df["Senior Score"].max()) if not chart_df.empty else 100.0
-    range_min = max(0.0, min_score - 8.0)
-    range_max = min(100.0, max_score + 4.0)
-    if range_max - range_min < 12:
-        range_min = max(0.0, range_max - 12.0)
+    range_min = max(0.0, min_score - 10.0)
+    range_max = min(100.0, max_score + 6.0)
+    if range_max - range_min < 16:
+        range_min = max(0.0, range_max - 16.0)
+
+    color_col = "Apto nivel seleccionado"
+    legend_title = f"Apto nivel {active_level}"
 
     fig = px.bar(
         chart_df,
@@ -536,18 +680,21 @@ def build_bar_chart(ranking_df: pd.DataFrame):
         y="Nombre",
         orientation="h",
         text="Senior Score",
-        color="Apto senior ahora",
+        color=color_col,
         color_discrete_map={"Sí": "#2E8B57", "No": "#D2691E"},
     )
     fig.update_traces(texttemplate="%{text:.1f}", textposition="outside", cliponaxis=False)
     fig.update_layout(
-        height=max(380, 70 * len(chart_df)),
+        height=max(420, 78 * len(chart_df)),
         xaxis_title="Senior Score",
         yaxis_title="",
         xaxis_range=[range_min, range_max],
-        legend_title="Apto senior ahora",
-        margin=dict(l=20, r=30, t=20, b=20),
+        legend_title=legend_title,
+        margin=dict(l=20, r=40, t=20, b=20),
+        bargap=0.35,
     )
+    fig.update_xaxes(showgrid=True, gridwidth=1, dtick=2)
+    fig.update_yaxes(categoryorder="total ascending")
     return fig
 
 
@@ -577,7 +724,8 @@ def build_radar_chart(scored_candidates: list):
                 theta=categories + [categories[0]],
                 fill="toself",
                 name=candidate["name"],
-                opacity=0.25,
+                opacity=0.22,
+                line=dict(width=2),
             )
         )
 
@@ -586,7 +734,7 @@ def build_radar_chart(scored_candidates: list):
             radialaxis=dict(visible=True, range=[0, 100]),
         ),
         showlegend=True,
-        height=650,
+        height=680,
         margin=dict(l=40, r=40, t=20, b=20),
     )
     return fig
@@ -607,13 +755,24 @@ st.caption(
 with st.expander("Criterios de selección del senior", expanded=True):
     st.markdown(CRITERIA_TEXT)
     st.table(CRITERIA_TABLE)
+    st.markdown("**Niveles de exigencia**")
+    st.table(EXIGENCE_TABLE)
 
 st.info(
     "Importante: la app funciona mejor si los ficheros se han abierto y guardado previamente en Excel "
     "con las fórmulas actualizadas."
 )
 
-upload_col, clear_col = st.columns([4, 1.2])
+control_col, upload_col, clear_col = st.columns([1.4, 3.2, 1.2])
+
+with control_col:
+    active_level = st.selectbox(
+        "Nivel de exigencia",
+        options=[3, 2, 1],
+        index=0,
+        format_func=lambda x: EXIGENCE_LEVELS[x]["label"],
+        help="Si en el nivel elegido no aparece ningún candidato válido, la app propondrá automáticamente el mejor perfil del siguiente nivel inferior disponible.",
+    )
 
 with upload_col:
     uploaded_files = st.file_uploader(
@@ -664,50 +823,71 @@ if not parsed_candidates:
 parsed_candidates = sorted(
     parsed_candidates,
     key=lambda x: (
-        1 if x["score"]["eligible_now"] else 0,
+        1 if eligible_at_level(x["score"], active_level) else 0,
+        x["score"]["highest_level_met"],
         x["score"]["senior_score"],
         x["candidate"]["global"]["vs_goal"] or 0,
     ),
     reverse=True,
 )
 
-selected_candidate = parsed_candidates[0]["candidate"]
-selected_score = parsed_candidates[0]["score"]
+selected_item, effective_level, downgraded = pick_candidate(parsed_candidates, active_level)
+selected_candidate = selected_item["candidate"]
+selected_score = selected_item["score"]
 
 st.subheader("Conclusión ejecutiva")
 
-if selected_score["eligible_now"]:
+if effective_level == active_level and effective_level > 0:
     st.success(
         f"**Candidato propuesto para consultor senior: {selected_candidate['name']}** "
+        f"(Senior Score {selected_score['senior_score']}/100, cumple el nivel {effective_level})."
+    )
+elif effective_level > 0:
+    st.warning(
+        f"**No aparece un candidato válido en el nivel {active_level}.** "
+        f"La mejor propuesta disponible baja al nivel {effective_level}: **{selected_candidate['name']}** "
         f"(Senior Score {selected_score['senior_score']}/100)."
     )
 else:
     st.warning(
-        f"**No aparece un senior plenamente consolidado en este grupo.** "
+        f"**No aparece un senior claro ni en los niveles 3, 2 o 1.** "
         f"El mejor perfil actual es **{selected_candidate['name']}** "
-        f"(Senior Score {selected_score['senior_score']}/100), pero todavía no cumple todo el estándar senior."
+        f"(Senior Score {selected_score['senior_score']}/100), pero todavía no alcanza el estándar mínimo definido."
     )
 
-st.markdown(candidate_argument(selected_candidate, selected_score, selected_name=selected_candidate["name"]))
+st.markdown(candidate_argument(
+    selected_candidate,
+    selected_score,
+    selected_name=selected_candidate["name"],
+    active_level=active_level,
+    effective_level=effective_level,
+))
+
+st.subheader("Informe global de decisión")
+st.text_area(
+    "Resumen ejecutivo",
+    value=build_global_report(parsed_candidates, selected_item, active_level, effective_level),
+    height=240,
+)
 
 st.subheader("Ranking final de candidatos")
-ranking_df = ranking_dataframe(parsed_candidates)
+ranking_df = ranking_dataframe(parsed_candidates, active_level)
 st.dataframe(ranking_df, use_container_width=True, hide_index=True)
 
 col1, col2, col3, col4, col5 = st.columns(5)
 with col1:
     st.metric("Nº candidatos", len(parsed_candidates))
 with col2:
-    st.metric("Aptos senior ahora", sum(1 for x in parsed_candidates if x["score"]["eligible_now"]))
+    st.metric(f"Aptos nivel {active_level}", sum(1 for x in parsed_candidates if eligible_at_level(x["score"], active_level)))
 with col3:
     st.metric("Mejor Senior Score", f"{parsed_candidates[0]['score']['senior_score']}/100")
 with col4:
-    st.metric("Mejor vs objetivo global", format_pct(max((x["candidate"]["global"]["vs_goal"] or 0) for x in parsed_candidates)))
+    st.metric("Aptos nivel 3", sum(1 for x in parsed_candidates if eligible_at_level(x["score"], 3)))
 with col5:
-    st.metric("Mejor vs media BBDD", format_pct(max((x["candidate"]["global"]["vs_bbdd"] or 0) for x in parsed_candidates)))
+    st.metric("Aptos nivel 1-2-3", sum(1 for x in parsed_candidates if x["score"]["highest_level_met"] > 0))
 
 st.markdown("**Comparación visual del ranking final**")
-st.plotly_chart(build_bar_chart(ranking_df), use_container_width=True)
+st.plotly_chart(build_bar_chart(ranking_df, active_level), use_container_width=True)
 
 st.markdown("**Mapa de fortalezas y debilidades de los candidatos**")
 st.caption(
@@ -724,13 +904,21 @@ for item in parsed_candidates:
 
     title = (
         f"{candidate['name']} · Senior Score {score_data['senior_score']}/100 · "
-        f"{'Apto senior ahora' if score_data['eligible_now'] else 'No apto senior todavía'}"
+        f"Cumple hasta nivel {score_data['highest_level_met'] if score_data['highest_level_met'] else '0'}"
     )
     with st.expander(title, expanded=(candidate["name"] == selected_candidate["name"])):
         left, right = st.columns([1.05, 1])
 
         with left:
-            st.markdown(candidate_argument(candidate, score_data, selected_name=selected_candidate["name"]))
+            st.markdown(
+                candidate_argument(
+                    candidate,
+                    score_data,
+                    selected_name=selected_candidate["name"],
+                    active_level=active_level,
+                    effective_level=effective_level,
+                )
+            )
 
             components_df = pd.DataFrame(
                 [
@@ -746,13 +934,14 @@ for item in parsed_candidates:
 
             checks_df = pd.DataFrame(
                 [
-                    {"Filtro mínimo senior": "Supera objetivo global", "Cumple": "Sí" if score_data["eligibility_checks"]["global_vs_goal"] else "No"},
-                    {"Filtro mínimo senior": "Sin tronco claramente débil", "Cumple": "Sí" if score_data["eligibility_checks"]["weakest_trunk"] else "No"},
-                    {"Filtro mínimo senior": "Sin carencias graves en críticos", "Cumple": "Sí" if score_data["eligibility_checks"]["critical_gaps"] else "No"},
-                    {"Filtro mínimo senior": "Capacidad de transferencia suficiente", "Cumple": "Sí" if score_data["eligibility_checks"]["transfer_floor"] else "No"},
+                    {"Filtro": "Supera objetivo global", "Nivel 3": "Sí" if checks_for_level(score_data, 3).get("global_vs_goal") else "No", "Nivel 2": "Sí" if checks_for_level(score_data, 2).get("global_vs_goal") else "No", "Nivel 1": "Sí" if checks_for_level(score_data, 1).get("global_vs_goal") else "No"},
+                    {"Filtro": "Sin tronco claramente débil", "Nivel 3": "Sí" if checks_for_level(score_data, 3).get("weakest_trunk") else "No", "Nivel 2": "Sí" if checks_for_level(score_data, 2).get("weakest_trunk") else "No", "Nivel 1": "Sí" if checks_for_level(score_data, 1).get("weakest_trunk") else "No"},
+                    {"Filtro": "Sin carencias graves en críticos", "Nivel 3": "Sí" if checks_for_level(score_data, 3).get("critical_gaps") else "No", "Nivel 2": "Sí" if checks_for_level(score_data, 2).get("critical_gaps") else "No", "Nivel 1": "Sí" if checks_for_level(score_data, 1).get("critical_gaps") else "No"},
+                    {"Filtro": "Transferencia suficiente", "Nivel 3": "Sí" if checks_for_level(score_data, 3).get("transfer_floor") else "No", "Nivel 2": "Sí" if checks_for_level(score_data, 2).get("transfer_floor") else "No", "Nivel 1": "Sí" if checks_for_level(score_data, 1).get("transfer_floor") else "No"},
+                    {"Filtro": "Senior Score suficiente", "Nivel 3": "Sí" if checks_for_level(score_data, 3).get("senior_score_floor") else "No", "Nivel 2": "Sí" if checks_for_level(score_data, 2).get("senior_score_floor") else "No", "Nivel 1": "Sí" if checks_for_level(score_data, 1).get("senior_score_floor") else "No"},
                 ]
             )
-            st.markdown("**Filtro mínimo senior**")
+            st.markdown("**Cumplimiento de filtros por nivel de exigencia**")
             st.dataframe(checks_df, use_container_width=True, hide_index=True)
 
         with right:
@@ -790,7 +979,7 @@ for item in parsed_candidates:
         st.dataframe(indicator_display, use_container_width=True, hide_index=True)
 
 st.subheader("Descargas")
-export_bytes = build_excel_report(parsed_candidates)
+export_bytes = build_excel_report(parsed_candidates, active_level)
 
 d1, d2 = st.columns(2)
 with d1:
@@ -806,7 +995,7 @@ with d2:
         item["candidate"]["name"]: {
             "species": item["candidate"]["species"],
             "senior_score": item["score"]["senior_score"],
-            "eligible_now": item["score"]["eligible_now"],
+            "highest_level_met": item["score"]["highest_level_met"],
             "global": item["candidate"]["global"],
         }
         for item in parsed_candidates
